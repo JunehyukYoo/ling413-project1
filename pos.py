@@ -1,3 +1,4 @@
+# NOTE This file is not being run as part of main.py right now.
 from collections import defaultdict, Counter
 import pandas as pd
 import pyconll
@@ -71,7 +72,7 @@ def evaluate_spacy_pos(model, conll_file):
     for sentence in conll_file:
         words = [w.form for w in sentence]
         actual_tags = [normalize_ud_tag(w.upos) for w in sentence]
-        
+
         # Create spaCy doc with UD tokenization
         doc = Doc(model.vocab, words=words)
         doc = model(doc)

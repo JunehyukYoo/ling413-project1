@@ -1,37 +1,41 @@
 from collections import defaultdict, Counter
 from spacy.tokens import Doc
 
-
-def extract_clausal_dependency(sentence):
+def extract_clausal_dependencies(sentence):
     """
-    Given a pyconll sentence, extract clause word order pattern
+    Given a pyconll sentence, extract *all* clause-level word order patterns
     (SVO, SOV, VO, SV, V, etc.) based on UD annotations.
+    Returns a list of labels (one per verb clause).
     """
-    verb, subj, obj = None, None, None
+    labels = []
 
-    # 1. Identify the verbs
-    for word in sentence:
-        if word.upos == 'VERB' and word.head == '0':
-            verb = word
-            break
-    if not verb:
-        return None  # skip sentences without verbs
-    
-    # 2. Find subject and object dependents of the verb if they exist
-    for word in sentence:
-        if word.head == verb.id:
-            if 'subj' in word.deprel:
-                subj = word
-            elif 'obj' in word.deprel:
-                obj = word
+    # 1. Loop over all verbs in the sentence
+    for verb in [w for w in sentence if w.upos == 'VERB']:
+        subj, obj = None, None
 
-    # 3. Determine word order pattern
-    elements = []
-    if subj: elements.append(("S", int(subj.id)))
-    if verb: elements.append(("V", int(verb.id)))
-    if obj: elements.append(("O", int(obj.id)))
-    label = "".join(t for t,_ in sorted(elements, key=lambda x: x[1]))
-    return label
+        # 2. Find subject and object dependents of this verb
+        for word in sentence:
+            if word.head == verb.id:
+                if 'subj' in word.deprel:
+                    subj = word
+                elif 'obj' in word.deprel:
+                    obj = word
+                elif 'obl:agent' in word.deprel:   # 被-agent
+                    subj = word
+                elif 'obl:patient' in word.deprel: # 把-patient
+                    obj = word
+
+        # 3. Build clause elements in surface order
+        elements = []
+        if subj: elements.append(("S", int(subj.id)))
+        elements.append(("V", int(verb.id)))
+        if obj:  elements.append(("O", int(obj.id)))
+
+        if elements:
+            label = "".join(t for t, _ in sorted(elements, key=lambda x: x[1]))
+            labels.append(label)
+
+    return labels if labels else None
 
 def train_majority_baseline_dep(conll_file):
     '''
@@ -40,92 +44,155 @@ def train_majority_baseline_dep(conll_file):
     '''
     label_counts = Counter()
     for sentence in conll_file:
-        label = extract_clausal_dependency(sentence)
-        if label:
-            label_counts[label] += 1
+        # label = extract_clausal_dependency(sentence)
+        # if label:
+        #     label_counts[label] += 1
+        labels = extract_clausal_dependencies(sentence)
+        if labels:
+            for label in labels:
+                label_counts[label] += 1
     return label_counts
 
 def predict_baseline_dep(model, sentence):
-    '''
-    Predict dependency ordering for one sentence with heuristics.
-    '''
-    for word in sentence:
-        if "把" in word.form: # special case for "ba" (把) construction
-            return "SOV"  
-        elif "被" in word.form: # special case for "bei" (被) passive
-            if "nsubj" in [w.deprel for w in sentence if w.head == word.id]:  # check if passive
-                return "OVS"
-            return "OV"  
-    return model.most_common(1)[0][0]  # otherwise, predict the most common label
+    """
+    Predict dependency orderings for all clauses (verbs) in a sentence.
+    Uses simple heuristics (BA/BEI) or falls back on majority baseline.
+    Returns a list of predicted labels, one per clause.
+    """
+    predictions = []
+
+    # Loop over all verbs in the sentence
+    verbs = [w for w in sentence if w.upos == "VERB"]
+    if not verbs:
+        return []  # no predictions if no verbs
+
+    for verb in verbs:
+        # Collect dependents for heuristic layer
+        subj = None
+        for w in sentence:
+            if w.head == verb.id:
+                if "subj" in w.deprel:
+                    subj = w
+
+        # --- Heuristics ---
+        # BA construction (把) → SOV
+        if any("把" in w.form for w in sentence):
+            predictions.append("SOV")
+            continue
+
+        # BEI passive (被) → OVS if subj present, else OV
+        if any("被" in w.form for w in sentence):
+            has_subj = subj is not None
+            predictions.append("OVS" if has_subj else "OV")
+            continue
+
+        # --- Default order from majority ---
+        predictions.append(model.most_common(1)[0][0])  # fallback
+
+    return predictions
 
 def evaluate_baseline_dep(model, conll_file):
     '''
     Evaluate the baseline model on a test set.
     '''
+    # actual, prediction = [], []
+    # for sentence in conll_file:
+    #     # label = extract_clausal_dependency(sentence)
+    #     # if label:
+    #     #     actual.append(label)
+    #     #     prediction.append(predict_baseline_dep(model, sentence))
+    #     labels = extract_clausal_dependencies(sentence)
+    #     if labels:
+    #         for label in labels:
+    #             actual.append(label)
+    #             prediction.append(predict_baseline_dep(model, sentence))
+    # return actual, prediction
+
     actual, prediction = [], []
     for sentence in conll_file:
-        label = extract_clausal_dependency(sentence)
-        if label:
-            actual.append(label)
-            prediction.append(predict_baseline_dep(model, sentence))
-        
+        labels = extract_clausal_dependencies(sentence)  # gold labels
+        if not labels:
+            continue
+
+        preds = predict_baseline_dep(model, sentence)  # predicted labels
+
+        # If baseline predicted fewer labels than gold, pad with "N/A"
+        if len(preds) < len(labels):
+            preds += ["N/A"] * (len(labels) - len(preds))
+
+        # If baseline predicted more, truncate
+        if len(preds) > len(labels):
+            preds = preds[:len(labels)]
+
+        actual.extend(labels)
+        prediction.extend(preds)
+
     return actual, prediction
 
 def extract_order_spacy(model, sentence):
     """
-    Extracts SVO-style order from a sentence using spaCy's dependency parse.
-    Returns label string (e.g. 'SVO', 'VO', 'SOV').
+    Extracts SVO-style word order patterns from all clauses in a sentence
+    using spaCy's dependency parse.
+    Returns a list of labels (e.g. ["SVO", "VO"]).
     """
     doc = model(sentence)
-    verb, subj, obj = None, None, None
+    labels = []
 
-    # Find root verb
-    for token in doc:
-        if token.pos_ == "VERB":
-            verb = token
-            break
-    if not verb:
-        return None  # Skip sentences without clear root verb
+    # Loop over all verbs
+    verbs = [t for t in doc if t.pos_ == "VERB"]
+    if not verbs:
+        return []  # no verbs → no labels
 
-    # Find subject and object dependents
-    for token in verb.children:
-        if "subj" in token.dep_:
-            subj = token
-        elif "obj" in token.dep_:
-            obj = token
+    for verb in verbs:
+        subj, obj = None, None
 
-    elements = []
-    if subj: elements.append(("S", subj.i))
-    if verb: elements.append(("V", verb.i))
-    if obj:  elements.append(("O", obj.i))
+        # Find subject and object dependents of this verb
+        for child in verb.children:
+            if "subj" in child.dep_:
+                subj = child
+            elif "obj" in child.dep_:
+                obj = child
 
-    if not elements:
-        return None
+        # Build clause elements
+        elements = []
+        if subj: elements.append(("S", subj.i))
+        elements.append(("V", verb.i))
+        if obj:  elements.append(("O", obj.i))
 
-    # Sort by index order in the sentence
-    elements = sorted(elements, key=lambda x: x[1])
-    return "".join(e[0] for e in elements)
+        if elements:
+            label = "".join(t for t, _ in sorted(elements, key=lambda x: x[1]))
+            labels.append(label)
+
+    return labels
 
 def evaluate_spacy_dep(model, conll_file):
     '''
     Evaluate the spaCy model on a test set.
     '''
-    skipped = 0
     actual, prediction = [], []
+
     for sentence in conll_file:
-        label = extract_clausal_dependency(sentence)
-        if not label:
+        labels = extract_clausal_dependencies(sentence)  # gold labels
+        if not labels:
             continue
-        
+
         words = [w.form for w in sentence]
-        # Create spaCy doc with UD tokenization
-        pred = extract_order_spacy(model, " ".join(words))
-        if pred:
-            prediction.append(pred)
-            actual.append(label)
-        else:
-            skipped += 1
-    
-    if skipped > 0:
-        print(f"Skipped {skipped} sentences where spaCy produced no valid order.") 
+        preds = extract_order_spacy(model, " ".join(words))  # predicted labels
+
+        if preds is None:
+            preds = []
+
+        # If spaCy predicted fewer labels than gold, pad with "N/A"
+        if len(preds) < len(labels):
+            preds += ["N/A"] * (len(labels) - len(preds))
+
+        # If spaCy predicted more, truncate
+        if len(preds) > len(labels):
+            preds = preds[:len(labels)]
+
+        assert len(actual) == len(prediction), f"Mismatch: {len(actual)} vs {len(prediction)}"
+
+        actual.extend(labels)
+        prediction.extend(preds)
+
     return actual, prediction
