@@ -44,9 +44,6 @@ def train_majority_baseline_dep(conll_file):
     '''
     label_counts = Counter()
     for sentence in conll_file:
-        # label = extract_clausal_dependency(sentence)
-        # if label:
-        #     label_counts[label] += 1
         labels = extract_clausal_dependencies(sentence)
         if labels:
             for label in labels:
@@ -95,18 +92,6 @@ def evaluate_baseline_dep(model, conll_file):
     '''
     Evaluate the baseline model on a test set.
     '''
-    # actual, prediction = [], []
-    # for sentence in conll_file:
-    #     # label = extract_clausal_dependency(sentence)
-    #     # if label:
-    #     #     actual.append(label)
-    #     #     prediction.append(predict_baseline_dep(model, sentence))
-    #     labels = extract_clausal_dependencies(sentence)
-    #     if labels:
-    #         for label in labels:
-    #             actual.append(label)
-    #             prediction.append(predict_baseline_dep(model, sentence))
-    # return actual, prediction
 
     actual, prediction = [], []
     for sentence in conll_file:
